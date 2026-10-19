@@ -1,0 +1,143 @@
+# Tang Wang Jeng learning lab — one instance per VM.
+# Spawn: docker compose -p lab-<uid> --env-file <instance.env> up -d
+# Required env (see .env.example): NET_DMZ NET_INT NET_RES, IPs, WG_PORT,
+# DB_PASS, POS_PASS, BACKUP_PASS, FLAG1..3
+
+networks:
+  dmz:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${NET_DMZ}
+  internal:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: ${NET_INT}
+  restricted:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: ${NET_RES}
+
+services:
+  wg:
+    image: lscr.io/linuxserver/wireguard:latest
+    container_name: ${PREFIX}wg
+    cap_add: [NET_ADMIN, SYS_MODULE]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Asia/Bangkok
+      SERVERURL: ${WG_SERVERURL:-auto}
+      SERVERPORT: "${WG_PORT}"
+      PEERS: "1"
+      PEERDNS: auto
+      ALLOWEDIPS: ${NET_DMZ}
+    volumes:
+      - wgconf:/config
+      - /lib/modules:/lib/modules:ro
+    ports:
+      - "${WG_PORT}:51820/udp"
+    networks:
+      dmz:
+        ipv4_address: ${IP_WG}
+    restart: unless-stopped
+
+  db:
+    image: mariadb:11
+    container_name: ${PREFIX}db
+    environment:
+      MARIADB_DATABASE: chanom
+      MARIADB_USER: chanom
+      MARIADB_PASSWORD: ${DB_PASS}
+      MARIADB_RANDOM_ROOT_PASSWORD: "yes"
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h localhost -u$$MARIADB_USER -p$$MARIADB_PASSWORD --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      internal:
+        ipv4_address: ${IP_DB}
+    restart: unless-stopped
+
+  web:
+    build: ./web
+    container_name: ${PREFIX}web
+    environment:
+      DB_HOST: db
+      DB_NAME: chanom
+      DB_USER: chanom
+      DB_PASS: ${DB_PASS}
+      FLAG1: ${FLAG1}
+      INTRANET_HOST: ${IP_POS_INT}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      dmz:
+        ipv4_address: ${IP_WEB_DMZ}
+      internal:
+        ipv4_address: ${IP_WEB_INT}
+    restart: unless-stopped
+
+  intranet:
+    build: ./intranet
+    container_name: ${PREFIX}intranet
+    environment:
+      POS_PASS: ${POS_PASS}
+      BACKUP_PASS: ${BACKUP_PASS}
+      FLAG2: ${FLAG2}
+      HQ_HOST: ${IP_BACKUP}
+      DB_HOST: db
+      DB_NAME: chanom
+      DB_USER: chanom
+      DB_PASS: ${DB_PASS}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      internal:
+        ipv4_address: ${IP_POS_INT}
+      restricted:
+        ipv4_address: ${IP_POS_RES}
+    restart: unless-stopped
+
+  backup:
+    build: ./backup
+    container_name: ${PREFIX}backup
+    environment:
+      BACKUP_PASS: ${BACKUP_PASS}
+      FLAG3: ${FLAG3}
+    networks:
+      restricted:
+        ipv4_address: ${IP_BACKUP}
+    restart: unless-stopped
+
+  # Player Kali desktop — DMZ only (same view as a WireGuard player), no WG needed.
+  kali:
+    build: ./kali
+    container_name: ${PREFIX}kali
+    hostname: kali
+    cap_add: [NET_RAW, NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      KALI_VNC_PASS: ${KALI_VNC_PASS}
+      KALI_SSH_PUBKEY: ${KALI_SSH_PUBKEY}
+    ports:
+      - "${KALI_PORT:-6080}:6080"
+      - "${KALI_RDP_PORT:-3389}:3389"
+      - "${KALI_SSH_PORT:-2222}:22"
+    networks:
+      dmz:
+        ipv4_address: ${IP_KALI}
+    restart: unless-stopped
+
+volumes:
+  wgconf:

@@ -1,0 +1,18 @@
+[Unit]
+Description=Tunnriculum first-boot: generate instance env and start the lab
+Wants=network-online.target
+After=network-online.target docker.service
+ConditionPathExists=!/home/lab/tunnriculum/train/instances/tunnriculum.env
+
+[Service]
+Type=oneshot
+User=lab
+WorkingDirectory=/home/lab/tunnriculum/train
+ExecStart=/home/lab/tunnriculum/train/scripts/lab.sh init
+ExecStartPost=/home/lab/tunnriculum/train/scripts/lab.sh up
+StandardOutput=journal+console
+StandardError=journal+console
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

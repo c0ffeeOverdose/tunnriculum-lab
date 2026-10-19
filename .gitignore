@@ -1,0 +1,9 @@
+AGENTS.md
+dist/
+**/dist/
+instances/
+**/instances/*.env
+**/instances/*_key*
+**/target/
+__pycache__/
+*.qcow2

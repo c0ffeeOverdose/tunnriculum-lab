@@ -1,0 +1,12 @@
+[Unit]
+Description=Tunnriculum console banner (VM address + operator login)
+After=network-online.target tunnriculum-lab.service
+ConditionPathExists=/home/lab/tunnriculum/train/instances/tunnriculum.env
+
+[Service]
+Type=oneshot
+ExecStart=/home/lab/tunnriculum/train/scripts/appliance/banner.sh
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target

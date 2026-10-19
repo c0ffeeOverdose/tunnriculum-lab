@@ -1,0 +1,16 @@
+[package]
+name = "labctl"
+version = "0.1.0"
+edition = "2021"
+description = "Tunnriculum restricted TUI - Rust replacement for labctl.sh"
+license = "MIT"
+
+[dependencies]
+ratatui = { version = "0.29", features = ["crossterm"] }
+crossterm = "0.28"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
